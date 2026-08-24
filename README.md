@@ -406,9 +406,9 @@ retain the copyright notice and permission notice (they are already in the
 
 Examples of good attribution:
 
-- Keep the "Uptime Monitor" name and the license header in any forks or
+- Keep the "TC. Uptime Monitor" name and the license header in any forks or
   redistributed copies.
-- Mention "Powered by Uptime Monitor" in your project, status page, or
+- Mention "Powered by TC. Uptime Monitor" in your project, status page, or
   documentation.
 - Link back to the original repository when you publish something based on it.
 

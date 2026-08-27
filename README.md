@@ -14,7 +14,7 @@ and it watches them for you.
 > debugging, and development. However, the project was not created from a single
 > prompt or generated entirely by AI. Every major feature, implementation, design
 > decision, and modification was reviewed, tested, and directed by a human. AI was
-> utilized as a development assistant—not as a replacement for the developer.s
+> utilized as a development assistant—not as a replacement for the developer.
 
 ---
 

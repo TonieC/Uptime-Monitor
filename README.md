@@ -9,6 +9,13 @@ No third-party services, no external database, no SaaS subscription. You run it
 on your own machine (or a small VPS), point it at the endpoints you care about,
 and it watches them for you.
 
+> **A note on AI use:** Vibe-coded, but with full human intervention. AI was used
+> throughout the development of this project as a tool to speed up programming,
+> debugging, and development. However, the project was not created from a single
+> prompt or generated entirely by AI. Every major feature, implementation, design
+> decision, and modification was reviewed, tested, and directed by a human. AI was
+> utilized as a development assistant—not as a replacement for the developer.s
+
 ---
 
 ## Table of contents

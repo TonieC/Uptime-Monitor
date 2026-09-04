@@ -1,6 +1,6 @@
 'use strict';
 
-const RANGES = ['24h', '7d', '30d'];
+const RANGES = ['24h', '7d', '30d', '90d', '1y'];
 
 const Dashboard = {
   container: null,
@@ -190,7 +190,10 @@ const Dashboard = {
       avatar,
       el('div', { class: 'sc-title' }, [
         el('div', { class: 'sc-name' }, service.name),
-        el('div', { class: 'sc-url' }, service.method === 'GET' ? service.url : `${service.method} ${service.url}`),
+        el('div', { class: 'sc-url' }, [
+          el('span', { class: 'monitor-type' }, monitorTypeLabel(service.type || 'http')),
+          service.method === 'GET' ? service.url : `${service.method} ${service.url}`,
+        ]),
       ]),
       pill(status),
     ]);

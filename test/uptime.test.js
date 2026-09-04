@@ -5,11 +5,14 @@ const assert = require('node:assert');
 const { createDb } = require('../src/db');
 const { createServiceRepo } = require('../src/services');
 const { createChecksRepo } = require('../src/checks');
+const { createIncidentsRepo } = require('../src/incidents');
+const { createMaintenanceRepo } = require('../src/maintenance');
 const { makeConfig } = require('./helpers');
 const {
   computeSegments,
   computeResponseTimeseries,
   computeStats,
+  computeIncidentStats,
   computeUptimePercent,
   uptimePercent,
 } = require('../src/uptime');
@@ -195,5 +198,122 @@ describe('uptime aggregation', () => {
   test('uptimePercent util handles empty input', () => {
     assert.equal(uptimePercent([]), null);
     assert.equal(uptimePercent([{ status: 'up' }, { status: 'degraded' }, { status: 'down' }]), 66.67);
+  });
+});
+
+describe('uptime maintenance exclusion', () => {
+  test('computeStats ignores checks that ran inside a maintenance window', () => {
+    const cfg = makeConfig();
+    const db = createDb({ dbPath: cfg.dbPath });
+    const servicesRepo = createServiceRepo(db);
+    const checksRepo = createChecksRepo(db);
+    const maintenanceRepo = createMaintenanceRepo(db);
+    const svc = servicesRepo.create({ name: 'S', url: 'https://example.com' });
+    const now = Date.now();
+    // Maintenance covered the 8-4 day window.
+    maintenanceRepo.start(svc.id, {
+      startedAt: now - 8 * 86400 * 1000,
+      until: now - 4 * 86400 * 1000,
+      reason: 'planned',
+    });
+    seed(svc.id, checksRepo, [
+      { ts: now - 6 * 86400 * 1000, status: 'down' }, // inside window
+      { ts: now - 5 * 86400 * 1000, status: 'down' }, // inside window
+      { ts: now - 2 * 86400 * 1000, status: 'up', ms: 100 },
+      { ts: now - 1 * 86400 * 1000, status: 'up', ms: 100 },
+    ]);
+    const withExclusion = computeStats(db, svc.id, now - 30 * 86400 * 1000);
+    assert.equal(withExclusion.checks, 2);
+    assert.equal(withExclusion.down, 0);
+    assert.equal(withExclusion.up, 2);
+    assert.equal(withExclusion.uptime_percent, 100);
+    const without = computeStats(db, svc.id, now - 30 * 86400 * 1000, { excludeMaintenance: false });
+    assert.equal(without.checks, 4);
+    assert.equal(without.uptime_percent, 50);
+    db.close();
+  });
+
+  test('computeSegments shows maintenance periods as gray', () => {
+    const cfg = makeConfig();
+    const db = createDb({ dbPath: cfg.dbPath });
+    const servicesRepo = createServiceRepo(db);
+    const checksRepo = createChecksRepo(db);
+    const maintenanceRepo = createMaintenanceRepo(db);
+    const svc = servicesRepo.create({ name: 'S', url: 'https://example.com' });
+    // Maintenance window from 4h ago to 2h ago.
+    maintenanceRepo.start(svc.id, { startedAt: NOW - 4 * HOUR, until: NOW - 2 * HOUR, reason: 'upgrade' });
+    seed(svc.id, checksRepo, [
+      { ts: NOW - 3 * HOUR, status: 'down' },
+      { ts: NOW - 1 * HOUR, status: 'up', ms: 100 },
+    ]);
+    const { segments } = computeSegments(db, checksRepo, svc.id, '24h', NOW);
+    assert.equal(segments[segmentIndex(NOW - 3 * HOUR)].status, 'none');
+    assert.equal(segments[segmentIndex(NOW - 3 * HOUR)].checks, 0);
+    assert.equal(segments[segmentIndex(NOW - 1 * HOUR)].status, 'up');
+    // Disabling exclusion makes the down check visible again.
+    const raw = computeSegments(db, checksRepo, svc.id, '24h', NOW, { excludeMaintenance: false });
+    assert.equal(raw.segments[segmentIndex(NOW - 3 * HOUR)].status, 'down');
+    db.close();
+  });
+
+  test('computeUptimePercent excludes maintenance-covered downtime', () => {
+    const cfg = makeConfig();
+    const db = createDb({ dbPath: cfg.dbPath });
+    const servicesRepo = createServiceRepo(db);
+    const checksRepo = createChecksRepo(db);
+    const maintenanceRepo = createMaintenanceRepo(db);
+    const svc = servicesRepo.create({ name: 'S', url: 'https://example.com' });
+    const now = Date.now();
+    maintenanceRepo.start(svc.id, {
+      startedAt: now - 10 * 86400 * 1000,
+      until: now - 3 * 86400 * 1000,
+      reason: 'migration',
+    });
+    seed(svc.id, checksRepo, [
+      { ts: now - 5 * 86400 * 1000, status: 'down' }, // inside window
+      { ts: now - 1 * 86400 * 1000, status: 'up', ms: 100 },
+    ]);
+    assert.equal(computeUptimePercent(db, svc.id, { days: 30 }), 100);
+    assert.equal(computeUptimePercent(db, svc.id, { days: 30, excludeMaintenance: false }), 50);
+    db.close();
+  });
+});
+
+describe('incident statistics', () => {
+  test('computeIncidentStats aggregates resolved incidents in the window', () => {
+    const cfg = makeConfig();
+    const db = createDb({ dbPath: cfg.dbPath });
+    const servicesRepo = createServiceRepo(db);
+    const incidentsRepo = createIncidentsRepo(db);
+    const svc = servicesRepo.create({ name: 'S', url: 'https://example.com' });
+    const now = Date.now();
+    const one = incidentsRepo.create({ service_id: svc.id, started_at: now - 60 * MINUTE });
+    incidentsRepo.resolve(one.id, now - 30 * MINUTE); // 30 min downtime
+    const two = incidentsRepo.create({ service_id: svc.id, started_at: now - 20 * MINUTE });
+    incidentsRepo.resolve(two.id, now - 10 * MINUTE); // 10 min downtime
+    const stats = computeIncidentStats(db, incidentsRepo, svc.id, now - 24 * HOUR);
+    assert.equal(stats.incidents, 2);
+    assert.equal(stats.total_downtime_seconds, 40 * 60);
+    assert.equal(stats.avg_duration_seconds, 20 * 60);
+    assert.ok(stats.uptime_percent < 100);
+    // Older incidents outside the window are not counted.
+    const old = incidentsRepo.create({ service_id: svc.id, started_at: now - 2 * 24 * HOUR });
+    incidentsRepo.resolve(old.id, now - 2 * 24 * HOUR + 60 * MINUTE);
+    const within = computeIncidentStats(db, incidentsRepo, svc.id, now - 24 * HOUR);
+    assert.equal(within.incidents, 2);
+    db.close();
+  });
+
+  test('computeIncidentStats handles services with no incidents', () => {
+    const cfg = makeConfig();
+    const db = createDb({ dbPath: cfg.dbPath });
+    const servicesRepo = createServiceRepo(db);
+    const incidentsRepo = createIncidentsRepo(db);
+    const svc = servicesRepo.create({ name: 'S', url: 'https://example.com' });
+    const stats = computeIncidentStats(db, incidentsRepo, svc.id, Date.now() - 24 * HOUR);
+    assert.equal(stats.incidents, 0);
+    assert.equal(stats.total_downtime_seconds, 0);
+    assert.equal(stats.avg_duration_seconds, null);
+    db.close();
   });
 });

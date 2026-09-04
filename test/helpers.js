@@ -10,6 +10,10 @@ const { createDb } = require('../src/db');
 const { createServiceRepo } = require('../src/services');
 const { createChecksRepo } = require('../src/checks');
 const { createIncidentsRepo } = require('../src/incidents');
+const { createMaintenanceRepo } = require('../src/maintenance');
+const { createNotificationsRepo } = require('../src/notifications');
+const { createStatusPagesRepo } = require('../src/statusPages');
+const { createApiKeysRepo } = require('../src/apiKeys');
 const { MonitoringWorker } = require('../src/worker');
 const { createApp } = require('../src/server');
 
@@ -38,8 +42,23 @@ async function startTestServer(overrides = {}) {
   const servicesRepo = createServiceRepo(db);
   const checksRepo = createChecksRepo(db);
   const incidentsRepo = createIncidentsRepo(db);
+  const maintenanceRepo = createMaintenanceRepo(db);
+  const notificationsRepo = createNotificationsRepo(db);
+  const statusPagesRepo = createStatusPagesRepo(db);
+  const apiKeysRepo = createApiKeysRepo(db);
   const worker = new MonitoringWorker({ db, servicesRepo, checksRepo, incidentsRepo, config: cfg });
-  const app = createApp({ db, servicesRepo, checksRepo, incidentsRepo, worker, config: cfg });
+  const app = createApp({
+    db,
+    servicesRepo,
+    checksRepo,
+    incidentsRepo,
+    maintenanceRepo,
+    notificationsRepo,
+    statusPagesRepo,
+    apiKeysRepo,
+    worker,
+    config: cfg,
+  });
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -51,6 +70,10 @@ async function startTestServer(overrides = {}) {
     servicesRepo,
     checksRepo,
     incidentsRepo,
+    maintenanceRepo,
+    notificationsRepo,
+    statusPagesRepo,
+    apiKeysRepo,
     worker,
     server,
     async close() {

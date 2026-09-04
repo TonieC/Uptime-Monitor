@@ -2,7 +2,7 @@
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert');
-const { createDb } = require('../src/db');
+const { createDb, SCHEMA_VERSION } = require('../src/db');
 const { createServiceRepo } = require('../src/services');
 const { createChecksRepo } = require('../src/checks');
 const { createIncidentsRepo } = require('../src/incidents');
@@ -24,7 +24,7 @@ describe('database layer', () => {
   test('schema is created and settings are initialized', () => {
     const { db, close } = freshRepos();
     const version = db.prepare("SELECT value FROM settings WHERE key = 'schema_version'").get();
-    assert.equal(version.value, '1');
+    assert.equal(version.value, String(SCHEMA_VERSION));
     close();
   });
 

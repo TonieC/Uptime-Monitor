@@ -12,10 +12,11 @@ const NOW = Date.now();
 
 // Build index.html with all <script src> tags inlined so no external
 // resource loading is needed (jsdom 26 no longer ships a public ResourceLoader).
+// The src values use a "./js/..." prefix, so strip any leading "./" or "/".
 function inlineHtml() {
   const html = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
-  return html.replace(/<script src="(\/js\/[^"]+\.js)"><\/script>/g, (_, src) => {
-    const file = path.resolve(PUBLIC, src.replace(/^\//, ''));
+  return html.replace(/<script src="((?:\.\/|\/)?js\/[^"]+\.js(?:\?[^"]*)?)"><\/script>/g, (_, src) => {
+    const file = path.resolve(PUBLIC, src.replace(/^(?:\.\/|\/)+/, '').replace(/\?.*$/, ''));
     const code = fs.readFileSync(file, 'utf8');
     return `<script>\n${code}\n</script>`;
   });

@@ -45,6 +45,8 @@ async function request(path, options = {}) {
 const API = {
   getSession: () => request('/api/session'),
   getSummary: () => request('/api/summary'),
+  getStatistics: (range) => request(`/api/statistics?range=${encodeURIComponent(range)}`),
+
   listServices: () => request('/api/services'),
   getService: (id) => request(`/api/services/${id}`),
   createService: (data) => request('/api/services', { method: 'POST', body: data }),
@@ -57,4 +59,30 @@ const API = {
   getServiceIncidents: (id, limit = 100) =>
     request(`/api/services/${id}/incidents?limit=${limit}`),
   getIncidents: (limit = 100) => request(`/api/incidents?limit=${limit}`),
+  getMonitorStatus: (id) => request(`/api/monitors/${id}/status`),
+  getMonitorStatistics: (id, range) =>
+    request(`/api/monitors/${id}/statistics?range=${encodeURIComponent(range)}`),
+  getServiceMaintenance: (id, limit = 50) =>
+    request(`/api/services/${id}/maintenance?limit=${limit}`),
+
+  listNotifications: () => request('/api/notifications'),
+  createNotification: (data) => request('/api/notifications', { method: 'POST', body: data }),
+  updateNotification: (id, data) => request(`/api/notifications/${id}`, { method: 'PUT', body: data }),
+  deleteNotification: (id) => request(`/api/notifications/${id}`, { method: 'DELETE' }),
+  testNotification: (id) => request(`/api/notifications/${id}/test`, { method: 'POST' }),
+
+  listStatusPages: () => request('/api/status-pages'),
+  createStatusPage: (data) => request('/api/status-pages', { method: 'POST', body: data }),
+  updateStatusPage: (id, data) => request(`/api/status-pages/${id}`, { method: 'PUT', body: data }),
+  deleteStatusPage: (id) => request(`/api/status-pages/${id}`, { method: 'DELETE' }),
+
+  listApiKeys: () => request('/api/api-keys'),
+  createApiKey: (name) => request('/api/api-keys', { method: 'POST', body: { name } }),
+  toggleApiKey: (id, enabled) => request(`/api/api-keys/${id}`, { method: 'PATCH', body: { enabled } }),
+  deleteApiKey: (id) => request(`/api/api-keys/${id}`, { method: 'DELETE' }),
+
+  listMaintenance: (limit = 100) => request(`/api/maintenance?limit=${limit}`),
+  startMaintenance: (serviceId, until, reason) =>
+    request('/api/maintenance', { method: 'POST', body: { service_id: serviceId, until, reason } }),
+  endMaintenance: (id) => request(`/api/maintenance/${id}/end`, { method: 'POST' }),
 };

@@ -76,7 +76,9 @@ static hosts, status pages) can be monitored. With
 
 - **Server-side checks** — monitoring runs in the Node.js worker and continues
   even when no dashboard is open.
-- **Uptime bars** — 24h / 7d / 30d views with colored segments
+- **Multiple monitor types** — HTTP(S), ICMP ping, TCP port, and DNS monitors,
+  with type-specific fields (host/port, nameserver, keyword match, ...).
+- **Uptime bars** — 24h / 7d / 30d / 90d / 1y views with colored segments
   (green = operational, yellow = degraded, red = outage, dark = no data).
   Click any segment to see the details for that period.
 - **Response-time graph** — a live canvas line chart with a hover crosshair and
@@ -84,20 +86,37 @@ static hosts, status pages) can be monitored. With
 - **Incidents** — consecutive failures are grouped into incidents. A
   configurable confirmation threshold means a single blip does not create a
   false alarm. Incidents auto-resolve on recovery.
+- **Per-check retries** — transient failures are retried before a monitor is
+  marked down, and an optional `recovery_threshold` requires several clean
+  checks before an incident is closed.
+- **SSL expiry alerts** — HTTPS monitors surface certificate expiry and emit
+  an alert event when the certificate approaches its end of life.
+- **Maintenance windows** — put a monitor into maintenance so planned work does
+  not create incidents or skew uptime statistics; stats exclude maintenance
+  periods.
+- **Notifications** — Discord, Telegram, email (SMTP), and generic webhook
+  channels; pick which events alert (down, recovered, degraded, SSL expiring).
+- **Public status pages** — publish a branded, read-only status page per
+  monitor group on a shareable URL.
+- **API keys** — machine-to-machine access to the REST API without exposing the
+  admin password; keys are stored hashed.
 - **Real-time updates** — a WebSocket connection pushes new checks, status
   changes, and incident events to the dashboard instantly.
 - **Degradation detection** — optional response-time threshold marks a service
   as "degraded" when it is slow but not down.
-- **Flexible checks** — choose the HTTP method, expected status codes, interval,
-  timeout, and failure confirmation count per service.
+- **Flexible HTTP checks** — choose the HTTP method, expected status codes,
+  custom headers, basic auth, a custom user agent, and expected keyword
+  matching per service.
 - **Data retention** — old check history is pruned automatically so the database
   stays small.
-- **REST API** — a full JSON API for services, checks, incidents, and uptime
-  data, so you can build your own integrations.
-- **Optional authentication** — enable HTTP Basic Auth with two environment
-  variables.
+- **REST API** — a full JSON API for services (aliased as `monitors`), checks,
+  incidents, uptime, maintenance, notifications, status pages, and API keys.
+- **Optional authentication** — HTTP Basic Auth and/or API keys with two
+  environment variables plus a UI-managed key store.
 - **SSRF protection** — target URLs are validated against private and
   loopback networks before every request (including redirects).
+- **Safe upgrades** — schema migrations are additive; existing v1 databases
+  upgrade in place without losing data.
 - **Zero build step** — the frontend is vanilla HTML/CSS/JS. No bundler, no
   framework, no `node_modules` bloat on the client.
 
@@ -177,6 +196,12 @@ All settings are environment variables.
 | `ALLOW_PRIVATE_NETWORKS` | `false` | Allow monitoring private/internal networks |
 | `CHECK_RETENTION_DAYS` | `90` | Keep check history for N days, then prune |
 | `CHECK_RETENTION_INTERVAL_MINUTES` | `60` | How often the retention pruner runs |
+| `SMTP_HOST` | *(empty)* | Default SMTP host for email notifications |
+| `SMTP_PORT` | `587` | Default SMTP port (use `465` with `SMTP_SECURE=true`) |
+| `SMTP_SECURE` | `false` | Use TLS for the default SMTP connection |
+| `SMTP_USER` | *(empty)* | SMTP username |
+| `SMTP_PASS` | *(empty)* | SMTP password |
+| `SMTP_FROM` | *(empty)* | Default "From" address for notification email |
 
 For a plain Node install you can set these inline:
 
@@ -198,12 +223,28 @@ HTTP Basic auth. When either is empty, authentication is disabled (intended for
 local or trusted environments). The WebSocket connection authenticates with a
 short-lived token obtained from `/api/session`.
 
+Independent of Basic Auth, you can create **API keys** from the UI or the
+`/api/api-keys` endpoint. Presenting a valid key (`X-API-Key` header or Bearer
+token) authorizes a request, which is the recommended path for scripts and CI.
+Only a SHA-256 hash of each key is stored; the plaintext is shown exactly once
+at creation.
+
+The `/status/:slug` pages and their `/api/public/status/:slug` data are always
+public — no authentication is required to view a status page.
+
 ### Monitoring private networks
 
 By default the monitor refuses to check addresses that resolve to private or
 loopback networks (SSRF protection) — the right choice for a publicly reachable
 instance. To monitor internal services such as `http://10.0.0.5/health`, set
 `ALLOW_PRIVATE_NETWORKS=true`.
+
+### Upgrading from an earlier version
+
+The database schema is versioned with additive migrations: starting an older
+database on a newer build applies the missing tables/columns automatically and
+never drops or rewrites existing data. Back up the `data/` directory (or the
+`uptime-data` volume) before upgrading, then simply start the new version.
 
 ## How to use the app
 
@@ -213,31 +254,41 @@ instance. To monitor internal services such as `http://10.0.0.5/health`, set
    http://localhost:3000.
 2. Click **Add service** in the sidebar (or the **+ Add service** button on the
    dashboard).
-3. Fill in the form:
-   - **Service name** — anything you want, e.g. "Production API".
-   - **URL** — the HTTP(S) endpoint to check, e.g. `https://example.com/health`.
-   - **Method** — the HTTP method to use for the check.
-   - **Expected status codes** — which HTTP codes count as healthy. The default
-     is `200`; use `200, 201, 204` for APIs that return other success codes.
-   - **Check interval (seconds)** — how often to check. Minimum 5.
-   - **Timeout (ms)** — how long to wait before counting the check as failed.
-   - **Degraded threshold (ms)** — optional. Slower responses mark the service
-     "degraded" instead of "up".
-   - **Failures to confirm outage** — consecutive failures before an incident is
-     opened. Use `2`-`3` if your service has occasional blips.
+3. Choose a **monitor type** and fill in the form:
+   - **HTTP / HTTPS** — monitor a web endpoint.
+     - **URL** — the URL to check, e.g. `https://example.com/health`.
+     - **Method** — the HTTP method to use for the check.
+     - **Expected status codes** — which HTTP codes count as healthy. The
+       default is `200`; use `200, 201, 204` for APIs that return other success
+       codes.
+     - **Headers / Basic auth / User agent** — optional custom headers (one
+       `Name: value` per line), HTTP basic auth credentials, or a custom user
+       agent for servers that require them.
+     - **Keyword** — optional text that must (or must not) appear in the
+       response body.
+     - **SSL checks** — optionally alert when the TLS certificate expires
+       within a chosen number of days.
+   - **Ping** — ICMP reachability to a host (uses the system `ping`).
+   - **TCP** — connect to a `host:port` (e.g. `tcp://db.internal:5432`).
+   - **DNS** — resolve a hostname against a configured nameserver.
+   - Shared settings: **name**, **interval (seconds)**, **timeout (ms)**,
+     **degraded threshold (ms)**, **failures to confirm outage**,
+     **retries** and **retry delay**, and **checks to recover** (how many
+     consecutive successful checks close an open incident).
 4. Click **Add service**. The first check runs right away.
 
 ### Navigating the app
 
-The app has three views, reachable from the sidebar:
+Views are reachable from the sidebar:
 
 - **Dashboard** (`#/`) — the default view.
   - Summary cards at the top: total services, operational, degraded, outages,
     and open incidents.
-  - One card per service showing its name, URL, current status pill, 30-day
-    uptime, last response time, time of last check, and incident count.
-  - A **time range toggle** (24H / 7D / 30D) switches the uptime bars on all
-    cards at once.
+  - One card per service showing its name, type badge, URL/target, current
+    status pill, 30-day uptime, last response time, time of last check, and
+    incident count.
+  - A **time range toggle** (24H / 7D / 30D / 90D / 1Y) switches the uptime bars
+    on all cards at once.
   - Click a service card to open its detail page.
 - **Service detail** (`#/services/1`) — everything about one service.
   - Stat cards: current and average response, min/max response, uptime
@@ -246,16 +297,29 @@ The app has three views, reachable from the sidebar:
   - An **Uptime history** bar (same colors as the dashboard).
   - An **Incidents** table with each outage and its duration.
   - A **Recent checks** table showing the last 50 checks.
+  - A **Maintenance** panel to start (duration + reason) and end maintenance
+    windows.
   - Action buttons: **Check now**, **Pause/Resume**, **Edit**, and **Delete**.
 - **Incidents** (`#/incidents`) — a global outage history across all services,
   with status, service, start, end, duration, check count, and error message.
+- **Notifications** (`#/notifications`) — manage alert channels. Add a Discord
+  webhook, Telegram bot, SMTP email, or generic webhook; pick which events
+  trigger it (down, recovered, degraded, SSL expiring) and send a test message.
+  Browser notifications can be enabled for instant incident alerts.
+- **Status pages** (`#/status-pages`) — create public status pages, choose which
+  monitors appear on them, and copy the shareable link.
+- **API keys** (`#/api-keys`) — create, revoke, and re-enable API keys for
+  programmatic access. The full key is shown only once at creation.
 
 ### Reading the uptime bars
 
 Each segment is one time bucket (1 hour in the 24h view, 3 hours in the 7d
-view, 6 hours in the 30d view). The color is the dominant status in that bucket:
-outage wins over degraded, degraded wins over operational. Click a segment to
-see the exact counts of up/degraded/failed checks in that period.
+view, 6 hours in the 30d view, 1 day in the 90d view, 1 week in the 1y view).
+The color is the dominant status in that bucket: outage wins over degraded,
+degraded wins over operational. Click a segment to see the exact counts of
+up/degraded/failed checks in that period. Buckets that fell entirely inside a
+maintenance window are shown as gray — those checks are excluded from uptime
+statistics.
 
 ### Live updates
 
@@ -270,47 +334,121 @@ reconnects automatically with backoff.
 - **Uptime percentage** is the share of checks that were `up` or `degraded`
   out of all checks in the selected period (degraded counts as operational for
   availability, since the service responded).
-- **Segments** (24h → 24 x 1h, 7d → 56 x 3h, 30d → 120 x 6h). The final segment
-  is the current, still-running period, so its "end" is always now.
-- **Incidents** open after `confirm_failures` consecutive failures and resolve
-  on the first successful check. `check_count` is the number of failed checks
-  that contributed.
+- **Segments** (24h → 24 x 1h, 7d → 56 x 3h, 30d → 120 x 6h, 90d → 90 x 1d,
+  1y → 52 x 1w). The final segment is the current, still-running period, so its
+  "end" is always now.
+- **Incidents** open after `confirm_failures` consecutive failures (subject to
+  per-check `retries`) and resolve after `recovery_threshold` consecutive
+  successful checks. `check_count` is the number of failed checks that
+  contributed.
+- **Maintenance** — while a maintenance window is active for a monitor, checks
+  keep running but failures never open or extend incidents, and those checks are
+  excluded from all uptime/statistics aggregations. The monitor reads as
+  "maintenance" in the UI.
+- **SSL expiry alerts** — a monitor with SSL checks enabled emits an
+  `ssl_expiring` event (and can notify) when its certificate is within
+  `ssl_expiry_threshold_days` of expiry; alerts are rate-limited to once per
+  24 hours per monitor.
 - **Check history** older than `CHECK_RETENTION_DAYS` is pruned automatically.
   Incidents are kept forever; only raw checks are pruned.
 
 ## REST API
 
 All endpoints return JSON. Errors use `{ "error": { "message", "code" } }`.
+`/api/services` and `/api/monitors` are aliases (the monitor terminology
+includes non-HTTP checks). Unless noted, endpoints require authentication when
+enabled (Basic Auth or an API key).
+
+### Core monitoring
 
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/api/health` | Health check |
-| `GET` | `/api/session` | Auth status + WebSocket token |
+| `GET` | `/api/session` | Auth status + WebSocket token + API-key availability |
 | `GET` | `/api/summary` | Aggregate counts |
-| `GET` | `/api/services` | List services (with last check + 30d uptime) |
-| `POST` | `/api/services` | Create a service |
-| `GET` | `/api/services/:id` | Get a service |
-| `PUT` | `/api/services/:id` | Partial update |
-| `DELETE` | `/api/services/:id` | Delete a service and its data |
-| `POST` | `/api/services/:id/check` | Run a check now |
+| `GET` | `/api/statistics?range=24h\|7d\|30d\|90d\|1y` | Global stats over the window |
+| `GET` | `/api/services` / `/api/monitors` | List monitors (status, last check, 30d uptime) |
+| `POST` | `/api/services` / `/api/monitors` | Create a monitor |
+| `GET` | `/api/services/:id` / `/api/monitors/:id` | Get a monitor |
+| `PUT` | `/api/services/:id` / `/api/monitors/:id` | Partial update |
+| `DELETE` | `/api/services/:id` / `/api/monitors/:id` | Delete a monitor and its data |
+| `POST` | `/api/services/:id/check` / `/api/monitors/:id/check` | Run a check now |
 | `GET` | `/api/services/:id/checks` | Recent checks (`limit`, `before`) |
-| `GET` | `/api/services/:id/incidents` | Incidents for a service |
-| `GET` | `/api/services/:id/uptime?range=24h\|7d\|30d` | Segments, timeseries, stats |
-| `GET` | `/api/incidents` | Recent incidents across all services |
+| `GET` | `/api/services/:id/incidents` | Incidents for a monitor |
+| `GET` | `/api/services/:id/uptime?range=` | Segments, timeseries, stats |
+| `GET` | `/api/monitors/:id/status` | Current status, last check, open incident, uptime |
+| `GET` | `/api/monitors/:id/statistics?range=` | Stats + incident stats over the window |
+| `GET` | `/api/monitors/:id/maintenance` | Maintenance windows for a monitor |
+| `GET` | `/api/incidents` | Recent incidents across all monitors |
+| `GET` | `/api/incidents/:id` | A single incident with its monitor |
 
-### Create a service
+### Maintenance
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/maintenance` | All maintenance windows |
+| `POST` | `/api/maintenance` | Start a window `{ service_id, until?, reason? }` |
+| `POST` | `/api/maintenance/:id/end` | End a window early |
+
+### Notifications
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/notifications` | List channels (secrets redacted) |
+| `POST` | `/api/notifications` | Create a channel |
+| `PUT` | `/api/notifications/:id` | Update a channel |
+| `DELETE` | `/api/notifications/:id` | Delete a channel |
+| `POST` | `/api/notifications/:id/test` | Send a test message (502 on delivery failure) |
+
+### Status pages
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/status-pages` | List pages with their `monitor_ids` |
+| `POST` | `/api/status-pages` | Create a page |
+| `PUT` | `/api/status-pages/:id` | Update a page (title, slug, monitors, branding) |
+| `DELETE` | `/api/status-pages/:id` | Delete a page |
+| `GET` | `/api/public/status/:slug` | **Public** page data (no auth) |
+| `GET` | `/status/:slug` | **Public** branded HTML page (no auth) |
+
+### API keys
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/api-keys` | List keys (prefix + metadata only) |
+| `POST` | `/api/api-keys` | Create a key — full key returned once |
+| `PATCH` | `/api/api-keys/:id` | Enable/disable (`{ enabled }`) |
+| `DELETE` | `/api/api-keys/:id` | Delete a key |
+
+### Create a monitor
 
 ```bash
-curl -X POST http://localhost:3000/api/services \
+curl -X POST http://localhost:3000/api/monitors \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "Example API",
+    "type": "http",
     "url": "https://example.com/health",
     "interval_seconds": 60,
     "timeout_ms": 5000,
     "degraded_threshold_ms": 1000,
-    "confirm_failures": 2
+    "confirm_failures": 2,
+    "retries": 1,
+    "recovery_threshold": 1
   }'
+```
+
+Monitors are created by default with `type: "http"` (legacy clients that only
+send `url` keep working). Other types: `type: "ping"` (`host`), `type: "tcp"`
+(`host` + `port`), and `type: "dns"` (`host` + optional `nameserver`).
+
+### Authenticating with an API key
+
+Send the key as `X-API-Key: <key>` or as a bearer token:
+
+```bash
+curl -X POST http://localhost:3000/api/services/:id/check \
+  -H "X-API-Key: $(KEY)"
 ```
 
 ## WebSocket
@@ -321,7 +459,8 @@ server pushes JSON messages:
 - `{ type: "check", serviceId, check }` — a check completed
 - `{ type: "status-change", serviceId, from, to, check }` — a service changed state
 - `{ type: "incident-opened", ...incident }` / `{ type: "incident-resolved", ...incident }`
-- `{ type: "service-changed" }` / `{ type: "service-deleted", serviceId }`
+- `{ type: "ssl-expiring", serviceId, daysLeft, ... }` — certificate nearing expiry
+- `{ type: "service-changed", service }` / `{ type: "service-deleted", serviceId }`
 
 ## Security
 
@@ -331,10 +470,14 @@ server pushes JSON messages:
   re-validated.
 - **Strict CSP and security headers** — no inline scripts, `frame-ancestors
   'none'`, `nosniff`, COOP/CORP, no referrer.
-- **No shell execution** — checks use a bounded HTTP fetch with a timeout and
-  never invoke the shell.
-- **No hardcoded secrets** — authentication credentials come only from the
-  environment.
+- **No shell execution** — HTTP checks use a bounded fetch with a timeout and
+  never invoke the shell (ping uses the system binary with bounded arguments).
+- **No hardcoded secrets** — admin credentials come only from the environment;
+  notification webhook/bot/password values are redacted in every API response;
+  API keys are stored as SHA-256 hashes and shown in plaintext only at creation.
+- **Public status pages** — only the data you explicitly publish on a page
+  (`/api/public/status/:slug`, `/status/:slug`) is exposed without auth; private
+  pages and everything else remain protected.
 - **Rate limiting is not built in** — put the app behind a reverse proxy (nginx,
   Caddy, Traefik) if you expose it to the internet.
 
@@ -342,20 +485,26 @@ server pushes JSON messages:
 
 ```
 src/
-  config.js        Environment configuration
-  db.js            SQLite schema + connection (WAL)
-  services.js      Service CRUD
+  config.js        Environment configuration (incl. SMTP defaults)
+  db.js            SQLite schema + migrations (versioned, additive) + WAL
+  services.js      Service/monitor CRUD (http, ping, tcp, dns)
   checks.js        Check log repository
   incidents.js     Incident repository
+  maintenance.js   Maintenance windows repository
+  notifications.js Notification channels + notifier (Discord/Telegram/email/webhook)
+  statusPages.js   Public status page repository
+  apiKeys.js       API key repository (hashed keys)
   validation.js    Input validation (create + partial update)
+  checkers.js      Per-type checkers (HTTP, ping, TCP, DNS, TLS cert)
   security.js      SSRF guard + security headers
-  uptime.js        Segment / timeseries / stats aggregation
-  worker.js        Monitoring loop, check execution, incident detection
+  uptime.js        Segment / timeseries / stats aggregation (24h..1y)
+  worker.js        Monitoring loop, retries, incident detection, SSL alerts
   ws.js            WebSocket hub (auth + broadcast)
   api.js           REST API routes
   server.js        App assembly + entry point
 public/
   index.html       SPA shell
+  status.html      Public status page shell
   css/styles.css   Dark theme
   js/              Frontend modules (no build step)
 test/              node:test suite (unit + API + frontend smoke)

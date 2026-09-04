@@ -1,6 +1,6 @@
 'use strict';
 
-const RANGES_OPTIONS = ['24h', '7d', '30d'];
+const RANGES_OPTIONS = ['24h', '7d', '30d', '90d', '1y'];
 
 const Detail = {
   container: null,
@@ -10,6 +10,7 @@ const Detail = {
   uptime: null,
   incidents: [],
   checks: [],
+  maintenance: [],
   chart: null,
   destroyed: false,
   loadToken: 0,
@@ -62,17 +63,19 @@ const Detail = {
   async load() {
     const token = ++this.loadToken;
     try {
-      const [service, uptime, incidents, checks] = await Promise.all([
+      const [service, uptime, incidents, checks, maintenance] = await Promise.all([
         API.getService(this.serviceId),
         API.getUptime(this.serviceId, this.range),
         API.getServiceIncidents(this.serviceId, 100),
         API.getChecks(this.serviceId, 50),
+        API.getServiceMaintenance(this.serviceId),
       ]);
       if (this.destroyed || token !== this.loadToken) return;
       this.service = service;
       this.uptime = uptime;
       this.incidents = incidents.incidents;
       this.checks = checks.checks;
+      this.maintenance = maintenance.maintenance || [];
       this.render();
       this.recentTimer = setInterval(() => this.refreshRecent(), 15000);
     } catch (err) {
@@ -87,19 +90,24 @@ const Detail = {
     container.innerHTML = '';
 
     const back = el('a', { href: '#/', class: 'back-link' }, '\u2190 Dashboard');
+    const activeMaintenance = this.maintenance.find((m) => !m.ended_at) || null;
     const header = el('div', { class: 'detail-head' }, [
       el('div', null, [
         el('div', { class: 'detail-name' }, [
           el('div', { class: 'sc-avatar', dataset: { status: s.enabled ? s.status : 'unknown' } }, s.name.charAt(0)),
           el('div', null, [
             el('h1', null, s.name),
-            el('div', { class: 'detail-url' }, s.method === 'GET' ? s.url : `${s.method} ${s.url}`),
+            el('div', { class: 'detail-url' }, [
+              el('span', { class: 'monitor-type' }, monitorTypeLabel(s.type || 'http')),
+              serviceTarget(s),
+            ]),
           ]),
           pill(s.enabled ? s.status : 'disabled'),
         ]),
       ]),
       el('div', { class: 'detail-actions' }, [
         el('button', { class: 'btn', id: 'detail-check-now' }, '\u23f3 Check now'),
+        el('button', { class: 'btn', id: 'detail-maintenance' }, activeMaintenance ? 'End maintenance' : 'Maintenance'),
         el('button', { class: 'btn', id: 'detail-toggle' }, s.enabled ? 'Pause' : 'Resume'),
         el('button', { class: 'btn', id: 'detail-edit' }, 'Edit'),
         el('button', { class: 'btn btn-danger', id: 'detail-delete' }, 'Delete'),
@@ -158,10 +166,10 @@ const Detail = {
         el('div', { class: 'chart-wrap' }, [
           el('div', { class: 'uptime-bar lg', id: 'detail-uptime-bar' }),
           el('div', { class: 'uptime-legend' }, [
-            legendItem('var(--green)', 'Operational'),
-            legendItem('var(--yellow)', 'Degraded'),
-            legendItem('var(--red)', 'Outage'),
-            legendItem('#1f2a40', 'No data'),
+            legendItem('up', 'Operational'),
+            legendItem('degraded', 'Degraded'),
+            legendItem('down', 'Outage'),
+            legendItem('none', 'No data'),
           ]),
         ]),
       ]),
@@ -173,10 +181,40 @@ const Detail = {
     // Incidents
     container.appendChild(this.renderIncidentsSection());
 
+    // Maintenance history
+    if (this.maintenance.length > 0) {
+      container.appendChild(this.renderMaintenanceSection());
+    }
+
     // Recent checks
     container.appendChild(this.renderChecksSection());
 
     this.bindActions();
+  },
+
+  renderMaintenanceSection() {
+    const sec = el('div', { class: 'section' }, [
+      el('div', { class: 'section-head' }, [
+        el('h2', null, `Maintenance windows (${this.maintenance.length})`),
+      ]),
+      el('div', { class: 'card table-wrap' }, [
+        el('table', null, [
+          el('thead', null, el('tr', null, [
+            el('th', null, 'Started'),
+            el('th', null, 'Ended'),
+            el('th', null, 'Status'),
+            el('th', null, 'Reason'),
+          ])),
+          el('tbody', null, this.maintenance.map((m) => el('tr', null, [
+            el('td', { class: 'td-dim' }, fmtDateTime(m.started_at)),
+            el('td', { class: 'td-dim' }, m.ended_at ? fmtDateTime(m.ended_at) : '\u2014'),
+            el('td', null, pill(m.ended_at ? 'up' : 'maintenance')),
+            el('td', null, el('div', { class: 'err-msg', title: m.reason || '' }, m.reason || '\u2014')),
+          ]))),
+        ]),
+      ]),
+    ]);
+    return sec;
   },
 
   chartTooltip(point) {
@@ -361,6 +399,18 @@ const Detail = {
       }
     });
 
+    const maintenanceBtn = this.container.querySelector('#detail-maintenance');
+    if (maintenanceBtn) {
+      maintenanceBtn.addEventListener('click', () => {
+        const active = this.maintenance.find((m) => !m.ended_at);
+        if (active) {
+          this.endMaintenance(active);
+        } else {
+          this.openMaintenanceModal();
+        }
+      });
+    }
+
     editBtn.addEventListener('click', () => {
       openServiceModal({
         service: s,
@@ -392,7 +442,7 @@ const Detail = {
       if (old && old !== sec) old.replaceWith(sec);
     } catch {
       /* ignore */
-    }2
+    }
   },
 
   // ---- Live WebSocket updates -----------------------------------------
@@ -451,11 +501,93 @@ const Detail = {
       })
       .catch(() => {});
   },
+
+  async openMaintenanceModal() {
+    const s = this.service;
+    const root = document.getElementById('modal-root');
+    root.innerHTML = '';
+
+    const errorBox = el('div', { class: 'form-error hidden' });
+    const durationInput = el('input', { type: 'number', id: 'mw-duration', min: '1', max: '1440', value: '60' });
+    const reasonSelect = el('select', { id: 'mw-reason' });
+    for (const r of maintenanceReasonOptions()) {
+      reasonSelect.appendChild(el('option', { value: r }, r));
+    }
+
+    const form = el('form', { class: 'form-grid', id: 'maintenance-form' }, [
+      errorBox,
+      el('div', { class: 'field' }, [
+        el('label', { for: 'mw-duration' }, 'Duration (minutes)'),
+        durationInput,
+      ]),
+      el('div', { class: 'field' }, [
+        el('label', { for: 'mw-reason' }, 'Reason'),
+        reasonSelect,
+      ]),
+      el('div', { class: 'full hint' }, 'While a maintenance window is active, failures are ignored, no alerts are sent, and downtime is excluded from statistics.'),
+    ]);
+
+    const foot = el('div', { class: 'modal-foot' }, [
+      el('button', { type: 'button', class: 'btn', 'data-dismiss': '1' }, 'Cancel'),
+      el('button', { type: 'submit', class: 'btn btn-primary', form: 'maintenance-form' }, 'Start maintenance'),
+    ]);
+    const modal = el('div', { class: 'modal' }, [
+      el('div', { class: 'modal-head' }, [
+        el('h2', null, `Maintenance for ${s.name}`),
+        el('button', { type: 'button', class: 'modal-close', 'data-dismiss': '1', 'aria-label': 'Close' }, '×'),
+      ]),
+      el('div', { class: 'modal-body' }, form),
+      foot,
+    ]);
+    const overlay = el('div', { class: 'modal-overlay' }, modal);
+    root.appendChild(overlay);
+
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target === overlay) overlay.remove();
+    });
+    overlay.addEventListener('click', (e) => {
+      if (e.target.hasAttribute('data-dismiss')) overlay.remove();
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const minutes = Number(durationInput.value);
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+        errorBox.textContent = 'Duration must be an integer between 1 and 1440 minutes.';
+        errorBox.classList.remove('hidden');
+        return;
+      }
+      const until = Date.now() + minutes * 60000;
+      const submitBtn = foot.querySelector('button[type="submit"]');
+      submitBtn.disabled = true;
+      try {
+        await API.startMaintenance(s.id, until, reasonSelect.value);
+        overlay.remove();
+        toast('Maintenance started. Alerts are paused during this window.', 'success');
+        this.load();
+      } catch (err) {
+        submitBtn.disabled = false;
+        errorBox.textContent = err?.message || 'Could not start maintenance.';
+        errorBox.classList.remove('hidden');
+      }
+    });
+  },
+
+  async endMaintenance(window) {
+    if (!window.confirm('End this maintenance window now? Failures will count again immediately.')) return;
+    try {
+      await API.endMaintenance(window.id);
+      toast('Maintenance ended.', 'success');
+      this.load();
+    } catch (err) {
+      toast(err?.message || 'Could not end maintenance.', 'error');
+    }
+  },
 };
 
-function legendItem(color, label) {
+function legendItem(cls, label) {
   return el('span', { class: 'item' }, [
-    el('span', { class: 'swatch', style: `background: ${color}` }),
+    el('span', { class: `swatch sw-${cls}` }),
     label,
   ]);
 }
@@ -471,4 +603,17 @@ function pickStats(check) {
     min_response_ms: check.response_time_ms,
     max_response_ms: check.response_time_ms,
   };
+}
+
+function serviceTarget(service) {
+  if (service.type === 'http') {
+    return service.method === 'GET' ? service.url : `${service.method} ${service.url}`;
+  }
+  if (service.port) return `${service.host}:${service.port}`;
+  if (service.expected_ip) return `${service.host} \u2192 ${service.expected_ip}`;
+  return service.host || '';
+}
+
+function maintenanceReasonOptions() {
+  return ['Planned upgrade', 'Scheduled maintenance', 'Configuration change', 'DNS migration', 'Manual'];
 }

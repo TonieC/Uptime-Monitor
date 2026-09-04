@@ -3,8 +3,8 @@
 function createChecksRepo(db) {
   const statements = {
     insert: db.prepare(
-      `INSERT INTO checks (service_id, timestamp, status, response_time_ms, status_code, error_type, error_message)
-       VALUES (@service_id, @timestamp, @status, @response_time_ms, @status_code, @error_type, @error_message)`
+      `INSERT INTO checks (service_id, timestamp, status, response_time_ms, status_code, error_type, error_message, packet_loss, cert_expires_at, cert_error)
+       VALUES (@service_id, @timestamp, @status, @response_time_ms, @status_code, @error_type, @error_message, @packet_loss, @cert_expires_at, @cert_error)`
     ),
     byService: db.prepare(
       `SELECT * FROM checks WHERE service_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?`
@@ -35,6 +35,9 @@ function createChecksRepo(db) {
         status_code: check.status_code ?? null,
         error_type: check.error_type ?? null,
         error_message: check.error_message ?? null,
+        packet_loss: check.packet_loss ?? null,
+        cert_expires_at: check.cert_expires_at ?? null,
+        cert_error: check.cert_error ?? null,
       }).lastInsertRowid;
     },
     listForService(serviceId, { limit = 50, before = Infinity } = {}) {

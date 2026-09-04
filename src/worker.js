@@ -1,157 +1,34 @@
 'use strict';
 
 const { EventEmitter } = require('events');
-const { validateTarget, parseUrl } = require('./security');
+const { performCheck } = require('./checkers');
 
-const MAX_REDIRECTS = 5;
-const USER_AGENT = 'UptimeMonitor/1.0 (+https://github.com/uptime-monitor)';
+const SSL_NOTIFY_COOLDOWN_MS = 24 * 3600 * 1000;
 
-function classifyError(err) {
-  const cause = err && err.cause ? err.cause : {};
-  const code = cause.code || '';
-  const name = (err && err.name ? err.name : '') + (cause.name || '');
-
-  if (err && err.name === 'AbortError') {
-    return { errorType: 'timeout', message: 'Request timed out' };
-  }
-  if (
-    code === 'UND_ERR_ABORTED' ||
-    code === 'UND_ERR_CONNECT_TIMEOUT' ||
-    code === 'UND_ERR_HEADERS_TIMEOUT' ||
-    code === 'ETIMEDOUT'
-  ) {
-    return { errorType: 'timeout', message: 'Request timed out' };
-  }
-  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'EAI_NODATA') {
-    return { errorType: 'dns', message: 'DNS resolution failed' };
-  }
-  if (
-    /CERT|TLS|UNABLE_TO_VERIFY|DEPTH_ZERO|SSL|HANDSHAKE/i.test(code) ||
-    /CERT|TLS|SSL/i.test(name)
-  ) {
-    return { errorType: 'tls', message: 'TLS/SSL error' };
-  }
-  if (
-    ['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EPIPE', 'ECONNABORTED', 'EADDRNOTAVAIL'].includes(code)
-  ) {
-    return { errorType: 'connection', message: 'Connection failed' };
-  }
-  return { errorType: 'other', message: (err && err.message) || 'Request failed' };
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function doFetch(parsedUrl, service, startMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), service.timeout_ms);
-  try {
-    const res = await fetch(parsedUrl.toString(), {
-      method: service.method || 'GET',
-      signal: controller.signal,
-      redirect: 'manual',
-      cache: 'no-store',
-      headers: {
-        'user-agent': USER_AGENT,
-        accept: '*/*',
-      },
-    });
-    const elapsed = Date.now() - startMs;
-    const location = res.headers.get('location');
-    if (res.body) res.body.cancel().catch(() => {});
-    return { ok: true, status: res.status, elapsed, location };
-  } catch (err) {
-    return { ok: false, error: classifyError(err) };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function failure(errorType, message, statusCode, startMs, opts = {}) {
+function defaultState() {
   return {
-    status: 'down',
-    responseTime: Date.now() - startMs,
-    statusCode: statusCode ?? null,
-    errorType,
-    errorMessage: message,
-    timestamp: opts.timestamp ?? startMs,
+    consecutiveFailures: 0,
+    incidentId: null,
+    lastStatus: null,
+    lastCheckAt: null,
+    recoveryStreak: 0,
+    sslNotifiedAt: 0,
   };
 }
 
-/**
- * Perform a single HTTP check for a service. Returns a normalized result:
- *   { status: 'up'|'degraded'|'down', responseTime, statusCode, errorType, errorMessage, timestamp }
- * Redirects are followed manually so every hop is re-validated against the
- * SSRF guard.
- */
-async function performCheck(service, { allowPrivateNetworks = false } = {}) {
-  const startMs = Date.now();
-  let target = service.url;
-  let redirects = 0;
-
-  const { parsed, error } = parseUrl(service.url);
-  if (error) return failure('invalid', error, null, startMs);
-
-  while (true) {
-    const validation = await validateTarget(target, { allowPrivateNetworks });
-    if (!validation.ok) {
-      if (validation.code === 'dns') {
-        return failure('dns', 'DNS resolution failed', null, startMs);
-      }
-      return failure('blocked', validation.message, null, startMs);
-    }
-
-    const res = await doFetch(validation.parsed, service, startMs);
-    if (!res.ok) {
-      const f = failure(res.error.errorType, res.error.message, null, startMs);
-      return f;
-    }
-
-    if (res.status >= 300 && res.status < 400 && res.location) {
-      if (redirects >= MAX_REDIRECTS) {
-        return failure('other', 'Too many redirects', res.status, startMs);
-      }
-      redirects += 1;
-      try {
-        target = new URL(res.location, validation.parsed).toString();
-      } catch {
-        return failure('invalid', 'Invalid redirect URL', res.status, startMs);
-      }
-      continue;
-    }
-
-    const expected = service.expected_status_codes || [200];
-    const statusOk = expected.includes(res.status);
-    let status;
-    if (!statusOk) {
-      status = 'down';
-    } else if (
-      service.degraded_threshold_ms &&
-      res.elapsed > service.degraded_threshold_ms
-    ) {
-      status = 'degraded';
-    } else {
-      status = 'up';
-    }
-
-    return {
-      status,
-      responseTime: res.elapsed,
-      statusCode: res.status,
-      errorType: statusOk ? null : 'http_status',
-      errorMessage: statusOk
-        ? null
-        : `Expected status ${expected.join(', ')} but received ${res.status}`,
-      timestamp: startMs,
-      redirects,
-    };
-  }
-}
-
 class MonitoringWorker extends EventEmitter {
-  constructor({ db, servicesRepo, checksRepo, incidentsRepo, config }) {
+  constructor({ db, servicesRepo, checksRepo, incidentsRepo, maintenanceRepo, notifier, config }) {
     super();
     this.db = db;
     this.servicesRepo = servicesRepo;
     this.checksRepo = checksRepo;
     this.incidentsRepo = incidentsRepo;
+    this.maintenanceRepo = maintenanceRepo || null;
+    this.notifier = notifier || null;
     this.config = config;
 
     this.timers = new Map();
@@ -172,6 +49,7 @@ class MonitoringWorker extends EventEmitter {
         consecutiveFailures = 1;
       }
       this.state.set(service.id, {
+        ...defaultState(),
         consecutiveFailures,
         incidentId: openIncident ? openIncident.id : null,
         lastStatus: last ? last.status : null,
@@ -214,12 +92,7 @@ class MonitoringWorker extends EventEmitter {
    */
   syncService(service) {
     if (!this.state.has(service.id)) {
-      this.state.set(service.id, {
-        consecutiveFailures: 0,
-        incidentId: null,
-        lastStatus: null,
-        lastCheckAt: null,
-      });
+      this.state.set(service.id, defaultState());
     }
     this.scheduleService(service);
   }
@@ -229,21 +102,22 @@ class MonitoringWorker extends EventEmitter {
     this.state.delete(serviceId);
   }
 
+  isInMaintenance(serviceId, atMs = Date.now()) {
+    if (!this.maintenanceRepo) return null;
+    return this.maintenanceRepo.activeForService(serviceId, atMs);
+  }
+
   /**
    * Run one check now (used by manual "check now" and the normal timer).
+   * Failed checks are retried per the monitor configuration before the
+   * result is committed.
    */
   async runService(service, { reschedule = true } = {}) {
-    const st = this.state.get(service.id) || {
-      consecutiveFailures: 0,
-      incidentId: null,
-      lastStatus: null,
-    };
+    const st = this.state.get(service.id) || defaultState();
 
     let result;
     try {
-      result = await performCheck(service, {
-        allowPrivateNetworks: this.config.allowPrivateNetworks,
-      });
+      result = await this.runWithRetries(service);
     } catch (err) {
       this.emit('worker-error', { serviceId: service.id, message: err.message });
       return null;
@@ -258,6 +132,9 @@ class MonitoringWorker extends EventEmitter {
         status_code: result.statusCode,
         error_type: result.errorType,
         error_message: result.errorMessage,
+        packet_loss: result.packetLoss,
+        cert_expires_at: result.certExpiresAt,
+        cert_error: result.certError,
       });
       this.handleResult(service, result, st);
     } catch (err) {
@@ -271,11 +148,50 @@ class MonitoringWorker extends EventEmitter {
     return result;
   }
 
+  async runWithRetries(service) {
+    let result = await performCheck(service, {
+      allowPrivateNetworks: this.config.allowPrivateNetworks,
+    });
+    const maxRetries = Math.min(Math.max(Number(service.retries) || 0, 0), 10);
+    let used = 0;
+    while (result.status === 'down' && used < maxRetries) {
+      used += 1;
+      if (Number(service.retry_delay_ms) > 0) {
+        await sleep(Math.min(Number(service.retry_delay_ms) || 0, 60000));
+      }
+      result = await performCheck(service, {
+        allowPrivateNetworks: this.config.allowPrivateNetworks,
+      });
+    }
+    result.retriesUsed = used;
+    return result;
+  }
+
   handleResult(service, result, st) {
     const previousStatus = st.lastStatus;
     const ts = result.timestamp;
 
+    if (this.isInMaintenance(service.id, ts)) {
+      // During maintenance the monitor still runs internally, but outages are
+      // not counted and no incidents/notifications are produced. The UI shows
+      // the service as "maintenance".
+      st.lastStatus = 'maintenance';
+      st.lastCheckAt = ts;
+      this.state.set(service.id, st);
+      if (previousStatus !== 'maintenance') {
+        this.emit('status-change', {
+          serviceId: service.id,
+          from: previousStatus,
+          to: 'maintenance',
+          check: result,
+        });
+      }
+      this.emit('check', { serviceId: service.id, check: result });
+      return;
+    }
+
     if (result.status === 'down') {
+      st.recoveryStreak = 0;
       st.consecutiveFailures += 1;
       if (st.consecutiveFailures >= service.confirm_failures) {
         const open = this.incidentsRepo.openForService(service.id);
@@ -284,7 +200,10 @@ class MonitoringWorker extends EventEmitter {
             service_id: service.id,
             started_at: ts,
             status_code: result.statusCode,
+            error_type: result.errorType,
             error_message: result.errorMessage,
+            response_time_ms: result.responseTime,
+            reason: 'Monitor is down',
             check_count: st.consecutiveFailures,
           });
           st.incidentId = incident.id;
@@ -293,19 +212,30 @@ class MonitoringWorker extends EventEmitter {
           st.incidentId = open.id;
           this.incidentsRepo.recordFailure(open.id, {
             status_code: result.statusCode,
+            error_type: result.errorType,
             error_message: result.errorMessage,
+            response_time_ms: result.responseTime,
+            reason: 'Monitor is down',
             duration_seconds: Math.round((ts - open.started_at) / 1000),
             check_count: st.consecutiveFailures,
           });
         }
       }
     } else {
+      // Successful check. Require `recovery_threshold` consecutive successes
+      // before declaring an open incident resolved.
       if (st.incidentId) {
-        const resolved = this.incidentsRepo.resolve(st.incidentId, ts);
-        if (resolved) {
-          this.emit('incident-resolved', resolved);
+        st.recoveryStreak = (st.recoveryStreak || 0) + 1;
+        if (st.recoveryStreak >= service.recovery_threshold) {
+          const resolved = this.incidentsRepo.resolve(st.incidentId, ts);
+          if (resolved) {
+            this.emit('incident-resolved', resolved);
+          }
+          st.incidentId = null;
+          st.recoveryStreak = 0;
         }
-        st.incidentId = null;
+      } else {
+        st.recoveryStreak = 0;
       }
       st.consecutiveFailures = 0;
     }
@@ -323,6 +253,24 @@ class MonitoringWorker extends EventEmitter {
       });
     }
     this.emit('check', { serviceId: service.id, check: result });
+
+    // SSL certificate expiry alerting. Emitted at most once per cooldown
+    // window; the notification layer deduplicates further.
+    if (result.certExpiresAt && service.check_certificate !== false) {
+      const daysLeft = (result.certExpiresAt - ts) / 86400000;
+      const threshold = service.ssl_expiry_threshold_days ?? 14;
+      if (daysLeft < threshold && ts - st.sslNotifiedAt >= SSL_NOTIFY_COOLDOWN_MS) {
+        st.sslNotifiedAt = ts;
+        this.state.set(service.id, st);
+        this.emit('ssl-expiring', {
+          serviceId: service.id,
+          service,
+          check: result,
+          daysLeft,
+          expiresAt: result.certExpiresAt,
+        });
+      }
+    }
   }
 
   startRetentionPruner() {

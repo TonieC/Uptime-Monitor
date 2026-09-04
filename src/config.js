@@ -26,6 +26,14 @@ const config = {
   checkRetentionIntervalMinutes: parsePositiveInt(
     process.env.CHECK_RETENTION_INTERVAL_MINUTES, 60, 1, 1440
   ),
+  // Optional SMTP defaults used by email notifications. Per-notification
+  // settings override these when set.
+  smtpHost: process.env.SMTP_HOST || '',
+  smtpPort: parsePositiveInt(process.env.SMTP_PORT, 587, 1, 65535),
+  smtpSecure: parseBool(process.env.SMTP_SECURE, false),
+  smtpUser: process.env.SMTP_USER || '',
+  smtpPass: process.env.SMTP_PASS || '',
+  smtpFrom: process.env.SMTP_FROM || '',
   nodeEnv: process.env.NODE_ENV || 'development',
 };
 

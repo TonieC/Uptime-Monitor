@@ -31,6 +31,75 @@ function toast(message, kind = 'info') {
   }, 4000);
 }
 
+// ---- Browser notifications -------------------------------------------------
+
+function browserNotificationsSupported() {
+  return typeof window.Notification !== 'undefined';
+}
+
+function browserNotificationsEnabled() {
+  try {
+    return localStorage.getItem('um_browser_notif') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function updateNotifButton() {
+  const label = document.getElementById('notif-btn-label');
+  const btn = document.getElementById('notif-btn');
+  if (!label || !btn) return;
+  if (!browserNotificationsSupported()) {
+    label.textContent = 'Alerts unsupported';
+    btn.classList.add('disabled');
+    return;
+  }
+  if (Notification.permission === 'granted' && browserNotificationsEnabled()) {
+    label.textContent = 'Alerts on';
+    btn.classList.add('on');
+  } else {
+    label.textContent = 'Enable alerts';
+    btn.classList.remove('on');
+  }
+}
+
+function setupNotifButton() {
+  const btn = document.getElementById('notif-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (!browserNotificationsSupported()) {
+      toast('Browser notifications are not supported in this browser.', 'error');
+      return;
+    }
+    if (Notification.permission !== 'granted') {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        toast('Notifications blocked by the browser.', 'error');
+        return;
+      }
+    }
+    try {
+      localStorage.setItem('um_browser_notif', '1');
+    } catch {
+      /* storage unavailable */
+    }
+    updateNotifButton();
+    toast('Browser alerts enabled.', 'ok');
+  });
+}
+
+function showBrowserNotification(title, body, kind = 'info') {
+  if (!browserNotificationsSupported()) return;
+  if (Notification.permission !== 'granted') return;
+  if (!browserNotificationsEnabled()) return;
+  try {
+    const n = new Notification(title, { body, tag: 'um-alert', icon: './favicon.svg' });
+    n.onclick = () => window.focus();
+  } catch {
+    /* notification rejected */
+  }
+}
+
 function navigate(hash) {
   if (window.location.hash === hash) {
     renderRoute();
@@ -57,6 +126,9 @@ function currentView() {
   const m = hash.match(/^#\/services\/(\d+)/);
   if (m) return { name: 'detail', serviceId: Number(m[1]) };
   if (hash.startsWith('#/incidents')) return { name: 'incidents' };
+  if (hash.startsWith('#/notifications')) return { name: 'notifications' };
+  if (hash.startsWith('#/status-pages')) return { name: 'status-pages' };
+  if (hash.startsWith('#/api-keys')) return { name: 'api-keys' };
   return { name: 'dashboard' };
 }
 
@@ -82,6 +154,18 @@ function renderRoute() {
       state.view = Incidents;
       Incidents.mount(view);
       break;
+    case 'notifications':
+      state.view = Notifications;
+      Notifications.mount(view);
+      break;
+    case 'status-pages':
+      state.view = StatusPages;
+      StatusPages.mount(view);
+      break;
+    case 'api-keys':
+      state.view = ApiKeys;
+      ApiKeys.mount(view);
+      break;
     default:
       state.view = Dashboard;
       Dashboard.mount(view);
@@ -102,7 +186,13 @@ function dispatchWs(msg) {
       if (state.view === Detail) Detail.handleStatusChange(msg);
       break;
     case 'incident-opened':
+      showBrowserNotification('Monitor down', msg.service ? `${msg.service.name} is experiencing an outage.` : 'A monitor is down.', 'error');
+      if (state.view === Dashboard) Dashboard.handleIncident();
+      if (state.view === Detail) Detail.handleIncident();
+      if (state.view === Incidents) Incidents.refresh();
+      break;
     case 'incident-resolved':
+      showBrowserNotification('Monitor recovered', msg.service ? `${msg.service.name} is back online.` : 'A monitor recovered.', 'ok');
       if (state.view === Dashboard) Dashboard.handleIncident();
       if (state.view === Detail) Detail.handleIncident();
       if (state.view === Incidents) Incidents.refresh();
@@ -124,6 +214,8 @@ function dispatchWs(msg) {
 
 async function init() {
   window.addEventListener('hashchange', renderRoute);
+  setupNotifButton();
+  updateNotifButton();
 
   try {
     const session = await API.getSession();

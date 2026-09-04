@@ -132,6 +132,8 @@ function statusLabel(status) {
       return 'Outage';
     case 'unknown':
       return 'No data';
+    case 'maintenance':
+      return 'Maintenance';
     default:
       return 'Disabled';
   }
@@ -147,8 +149,25 @@ function statusClass(status) {
       return 'pill-down';
     case 'unknown':
       return 'pill-unknown';
+    case 'maintenance':
+      return 'pill-maintenance';
     default:
       return 'pill-disabled';
+  }
+}
+
+function monitorTypeLabel(type) {
+  switch (type) {
+    case 'http':
+      return 'HTTP';
+    case 'ping':
+      return 'PING';
+    case 'tcp':
+      return 'TCP';
+    case 'dns':
+      return 'DNS';
+    default:
+      return String(type || 'HTTP').toUpperCase();
   }
 }
 

@@ -152,6 +152,30 @@ async function validateTarget(input, { allowPrivateNetworks = false } = {}) {
   return { ok: true, parsed };
 }
 
+/**
+ * Validate a raw host + port (used by tcp/ping/dns monitors) against the
+ * SSRF guard. Returns { ok: true } or { ok: false, code, message }.
+ */
+async function validateHostPort(host, port, { allowPrivateNetworks = false } = {}) {
+  if (!host) return { ok: false, code: 'invalid_target', message: 'A host is required' };
+  if (!net.isIP(host) && !isPrivateHostname(host) && /[^a-z0-9.\-_]/i.test(host)) {
+    return { ok: false, code: 'invalid_target', message: 'Host contains invalid characters' };
+  }
+  if (allowPrivateNetworks) return { ok: true };
+  const { addresses, error: resolveError } = await resolveHost(host);
+  if (resolveError) return { ok: false, code: 'dns', message: 'Could not resolve hostname' };
+  if (addresses.length === 0) return { ok: false, code: 'dns', message: 'Could not resolve hostname' };
+  const privateAddresses = addresses.filter(isPrivateIp);
+  if (privateAddresses.length > 0) {
+    return {
+      ok: false,
+      code: 'blocked_private',
+      message: `Target resolves to a private address (${privateAddresses[0]}). Set ALLOW_PRIVATE_NETWORKS=true to allow monitoring internal networks.`,
+    };
+  }
+  return { ok: true };
+}
+
 function securityHeaders(req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -182,5 +206,6 @@ module.exports = {
   isPrivateHostname,
   resolveHost,
   validateTarget,
+  validateHostPort,
   securityHeaders,
 };

@@ -14,6 +14,13 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - ALLOW_PRIVATE_NETWORKS=${ALLOW_PRIVATE_NETWORKS:-false}
       - CHECK_RETENTION_DAYS=${CHECK_RETENTION_DAYS:-90}
+      - CHECK_RETENTION_INTERVAL_MINUTES=${CHECK_RETENTION_INTERVAL_MINUTES:-60}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
     volumes:
       - uptime-data:/data
     healthcheck:
